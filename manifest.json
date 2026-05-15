@@ -1,0 +1,40 @@
+{
+  "required_api_version": "^2.0.0",
+  "name": "Vikunja Task",
+  "description": "Vikunja extension",
+  "developer_name": "Ugnius Soraka",
+  "icon": "images/vikunja.png",
+  "options": {
+    "query_debounce": 0.05
+  },
+  "preferences": [
+    {
+      "id": "vikunja_kw",
+      "type": "keyword",
+      "name": "Vikunja Task",
+      "default_value": "vk"
+    },
+    {
+      "id": "vikunja_url",
+      "type": "input",
+      "name": "Vikunja URL",
+      "description": "Address of hosted Vikunja instance (https:// ...)",
+      "default_value": "https://try.vikunja.io/"
+    },
+    {
+      "id": "api_token",
+      "type": "input",
+      "name": "API Token",
+      "description": "API Token generated in your Vikunja settings",
+      "default_value": "tk_xxxxxx"
+    },
+
+    {
+      "id": "default_project",
+      "type": "text",
+      "name": "Default Project",
+      "description": "Default project ID (1 for Inbox)",
+      "default_value": "1"
+    }
+  ]
+}
