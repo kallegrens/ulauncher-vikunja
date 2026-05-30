@@ -1,29 +1,28 @@
 import json
-#import logging
-#import os
 from datetime import date
 import requests
 import re
 import dateparser.search
-from ulauncher.api.client.Extension import Extension
-from ulauncher.api.client.EventListener import EventListener
-from ulauncher.api.shared.event import KeywordQueryEvent, ItemEnterEvent
-from ulauncher.api.shared.item.ExtensionResultItem import ExtensionResultItem
-from ulauncher.api.shared.action.RenderResultListAction import RenderResultListAction
+from ulauncher.api import Extension, ExtensionResult, effects
 from ulauncher.api.shared.action.ExtensionCustomAction import ExtensionCustomAction
-from ulauncher.api.shared.action.HideWindowAction import HideWindowAction
 
-#_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug.log')
-# logging.basicConfig(handlers=[logging.FileHandler(_log_path, mode='w'), logging.StreamHandler()], level=logging.DEBUG)
-#logger = logging.getLogger(__name__)
-#logger.setLevel(logging.DEBUG)
+# ExtensionCustomAction is kept as a legacy-supported path in v6 for passing
+# arbitrary data to on_item_enter. The new alternative is Result.actions +
+# on_result_activation, but that requires a bigger refactor.
+
+priority_list = {1: "Low", 2: "Medium", 3: "High", 4: "Urgent", 5: "DO NOW"}
 
 settings_read = False
 all_projects = None
 all_labels = None
 default_project = None
 config_error = None
-priority_list = { 1: "Low", 2: "Medium", 3: "High", 4: "Urgent", 5: "DO NOW" }
+
+# Module-level globals populated by read_global_settings()
+vikunja_url = None
+api_token = None
+default_pid = None
+auth_head = None
 
 
 def read_global_settings(extension, force=False):
@@ -32,16 +31,14 @@ def read_global_settings(extension, force=False):
     global default_project, config_error, all_labels, all_projects
     if settings_read and not force:
         return
-    #logger.info("Reading settings")
     config_error = None
     all_labels = None
     all_projects = None
     default_project = None
-    vikunja_url = extension.preferences["vikunja_url"] + '/api/v1'
+    vikunja_url = extension.preferences["vikunja_url"].rstrip('/') + '/api/v1'
     api_token = extension.preferences["api_token"]
     default_pid = int(extension.preferences["default_project"])
     auth_head = {"Authorization": "Bearer %s" % api_token}
-    # Probe API to validate config and pre-fill project cache
     try:
         r = requests.get('%s/projects' % vikunja_url, headers=auth_head, timeout=5)
         if r.status_code == 401:
@@ -63,7 +60,6 @@ def read_global_settings(extension, force=False):
 def filter_projects(title_contains):
     global all_projects
     if all_projects is None:
-        #logger.info("Fetching all projects")
         r = requests.get('%s/projects' % vikunja_url, headers=auth_head)
         if r.status_code == 200:
             fetched = r.json()
@@ -82,7 +78,6 @@ def get_default_project():
     global default_project
     if not default_project:
         r = requests.get('%s/projects/%d' % (vikunja_url, default_pid), headers=auth_head)
-        #logger.info("Default Project ID: %d return code: %d" % (default_pid, r.status_code))
         if r.status_code == 200:
             default_project = [r.json()]
         else:
@@ -94,7 +89,6 @@ def get_or_fetch_labels():
     """Return cached label list, fetching from API if needed."""
     global all_labels
     if all_labels is None:
-        #logger.info("Fetching all labels")
         r = requests.get('%s/labels' % vikunja_url, headers=auth_head)
         if r.status_code == 200:
             fetched = r.json()
@@ -112,48 +106,42 @@ def get_or_create_label(label_name):
     for label in labels:
         if label['title'].lower() == label_name.lower():
             return label['id']
-    # Label not found — create it
     headers = dict(auth_head)
     headers['Content-Type'] = 'application/json'
     r = requests.put('%s/labels' % vikunja_url, headers=headers, data=json.dumps({'title': label_name}))
     if r.status_code == 201:
         new_label = r.json()
         all_labels.append(new_label)
-        #logger.info("Created label '%s' with id %d" % (label_name, new_label['id']))
         return new_label['id']
-    #logger.warning("Failed to create label '%s': %s" % (label_name, r.text))
     return None
 
 
 def parse_input(text):
     """
     Extract labels (*word), priority (!1-5), and due date from task text.
-    Returns dict with keys: title (str), labels (list), priority (int|None), due_date (datetime|None).
+    Returns dict with keys: title, labels, priority, due_date.
     """
     labels = []
     priority = None
     due_date = None
 
-    # Extract labels: *word or *word_with_underscores
     for match in re.findall(r'\B\*\w+', text):
         labels.append(match[1:].replace('_', ' ').strip())
         text = text.replace(match, '')
 
-    # Extract priority: !1 through !5 (not followed by another digit)
     priority_match = re.search(r'![1-5](?!\d)', text)
     if priority_match:
         priority = int(priority_match.group()[1:])
         text = text.replace(priority_match.group(), '')
 
-    # Extract due date using dateparser
     due_match = re.search(r'(?:due)\s+(.*)', text, re.IGNORECASE)
     if due_match:
-        due_str = due_match.group();
+        due_str = due_match.group()
         date_results = dateparser.search.search_dates(
             due_str, settings={'PREFER_DATES_FROM': 'future', 'RETURN_AS_TIMEZONE_AWARE': False}
         )
         if date_results:
-            date_str, date_obj = date_results[0]
+            _date_str, date_obj = date_results[0]
             due_date = date_obj
             text = text.replace(due_str, '')
 
@@ -177,74 +165,70 @@ def format_card_description(project_title, parsed):
 
 
 class VikunjaExtension(Extension):
+    # No __init__ override needed — super().__init__() auto-registers on_input
+    # and on_item_enter because they're defined below, and self.preferences is
+    # already populated from the environment before __init__ returns.
 
-    def __init__(self):
-        super(VikunjaExtension, self).__init__()
-        self.subscribe(KeywordQueryEvent, KeywordQueryEventListener())
-        self.subscribe(ItemEnterEvent, ItemEnterEventListener())
-
-
-class KeywordQueryEventListener(EventListener):
-
-    def on_event(self, event, extension):
+    def on_input(self, query_str, trigger_id):
         """
-        Fires on every keystroke after the trigger keyword. Parses the query for
-        project (+), labels (*), priority (!), and due date, then renders one result
-        card per matching project.
+        Called on every keystroke after the trigger keyword (debounced).
+        query_str is the argument after the keyword (empty string if none typed yet).
+        trigger_id is the manifest trigger key.
         """
-        global all_projects, default_project
-        items = []
-        task_text = event.get_argument()
+        task_text = query_str
 
         if not task_text:
-            # Fresh activation — force-reload settings and probe API
-            read_global_settings(extension, True)
+            # Fresh activation — force-reload settings and probe API.
+            read_global_settings(self, force=True)
             if config_error:
-                items.append(ExtensionResultItem(icon='images/vikunja.png',
-                                                 name='Configuration Error',
-                                                 description=config_error,
-                                                 on_enter=HideWindowAction()))
-                return RenderResultListAction(items)
-            items.append(ExtensionResultItem(icon='images/vikunja.png',
-                                             name='Please type task text ...',
-                                             on_enter=HideWindowAction()))
-            return RenderResultListAction(items)
-        else:
-            read_global_settings(extension)
+                return [ExtensionResult(
+                    icon='images/vikunja.png',
+                    name='Configuration Error',
+                    description=config_error,
+                    on_enter=effects.close_window(),
+                )]
+            return [ExtensionResult(
+                icon='images/vikunja.png',
+                name='Please type task text ...',
+                on_enter=effects.close_window(),
+            )]
+
+        read_global_settings(self)
 
         if config_error:
-            items.append(ExtensionResultItem(icon='images/vikunja.png',
-                                             name='Configuration Error',
-                                             description=config_error,
-                                             on_enter=HideWindowAction()))
-            return RenderResultListAction(items)
+            return [ExtensionResult(
+                icon='images/vikunja.png',
+                name='Configuration Error',
+                description=config_error,
+                on_enter=effects.close_window(),
+            )]
 
         # Extract project search string (+word)
         for_projects = re.findall(r'\B\+\w+', task_text)
-        projects = []
         project_string = None
         if for_projects:
             task_text = re.sub(r' +', ' ', task_text.replace(for_projects[0], '')).strip()
             if not task_text:
-                items.append(ExtensionResultItem(icon='images/vikunja.png',
-                                                 name='Please type task text ...',
-                                                 on_enter=HideWindowAction()))
-                return RenderResultListAction(items)
+                return [ExtensionResult(
+                    icon='images/vikunja.png',
+                    name='Please type task text ...',
+                    on_enter=effects.close_window(),
+                )]
             project_string = for_projects[0][1:]
             projects = filter_projects(project_string)
         else:
             projects = get_default_project()
 
         if not projects:
-            items.append(ExtensionResultItem(icon='images/vikunja.png',
-                                             name='No projects like "%s" found!' % (project_string or ''),
-                                             on_enter=HideWindowAction()))
-            return RenderResultListAction(items)
+            return [ExtensionResult(
+                icon='images/vikunja.png',
+                name='No projects like "%s" found!' % (project_string or ''),
+                on_enter=effects.close_window(),
+            )]
 
-        # Parse remaining text for labels, priority, due date
         parsed = parse_input(task_text)
-        #logger.info("Parsed input: %s" % parsed)
 
+        items = []
         for project in projects:
             data = {
                 'project_id': project["id"],
@@ -255,23 +239,20 @@ class KeywordQueryEventListener(EventListener):
                 'due_date': parsed['due_date'].astimezone().isoformat() if parsed['due_date'] else None,
             }
             description = format_card_description(project["title"], parsed)
-            items.append(ExtensionResultItem(icon='images/vikunja.png',
-                                             name='"%s"' % parsed['title'],
-                                             description=description,
-                                             on_enter=ExtensionCustomAction(data, keep_app_open=True)))
+            items.append(ExtensionResult(
+                icon='images/vikunja.png',
+                name='"%s"' % parsed['title'],
+                description=description,
+                on_enter=ExtensionCustomAction(data, keep_app_open=True),
+            ))
+        return items
 
-        return RenderResultListAction(items)
-
-
-class ItemEnterEventListener(EventListener):
-
-    def on_event(self, event, extension):
+    def on_item_enter(self, data):
         """
-        Fires when the user selects a result card. Creates the task in Vikunja,
-        attaches any labels, then shows a success or error card.
+        Called when the user selects a result card. Creates the task in Vikunja,
+        attaches any labels, then returns a success or error result.
         """
-        data = event.get_data()
-        read_global_settings(extension, True)
+        read_global_settings(self, force=True)
         headers = dict(auth_head)
         headers['Content-Type'] = 'application/json'
 
@@ -281,35 +262,35 @@ class ItemEnterEventListener(EventListener):
         if data.get('due_date'):
             payload['due_date'] = data['due_date']
 
-        #logger.info("Task payload: %s" % payload)
-        r = requests.put('%s/projects/%s/tasks' % (vikunja_url, data['project_id']),
-                         headers=headers, data=json.dumps(payload))
+        r = requests.put(
+            '%s/projects/%s/tasks' % (vikunja_url, data['project_id']),
+            headers=headers,
+            data=json.dumps(payload),
+        )
 
         if r.status_code == 201:
-            task = r.json()
-            task_id = task['id']
-            #logger.info("Task created with id %d" % task_id)
-
-            # Attach labels
+            task_id = r.json()['id']
             for label_name in data.get('labels', []):
                 label_id = get_or_create_label(label_name)
                 if label_id:
-                    lr = requests.put('%s/tasks/%s/labels' % (vikunja_url, task_id),
-                                      headers=headers, data=json.dumps({'label_id': label_id}))
-                    if lr.status_code != 201:
-                        pass
-                        #logger.warning("Failed to attach label '%s': %s" % (label_name, lr.text))
+                    requests.put(
+                        '%s/tasks/%s/labels' % (vikunja_url, task_id),
+                        headers=headers,
+                        data=json.dumps({'label_id': label_id}),
+                    )
+            return [ExtensionResult(
+                icon='images/vikunja.png',
+                name='Added task "%s"' % data['task_text'],
+                description='To project "%s"' % data['project_title'],
+                on_enter=effects.close_window(),
+            )]
 
-            return RenderResultListAction([ExtensionResultItem(icon='images/vikunja.png',
-                                                               name='Added task "%s"' % data['task_text'],
-                                                               description='To project "%s"' % data['project_title'],
-                                                               on_enter=HideWindowAction())])
-        else:
-            #logger.error("Task creation failed: %s" % r.text)
-            return RenderResultListAction([ExtensionResultItem(icon='images/vikunja.png',
-                                                               name='Failed to add task "%s"' % data['task_text'],
-                                                               description='To project "%s"' % data['project_title'],
-                                                               on_enter=HideWindowAction())])
+        return [ExtensionResult(
+            icon='images/vikunja.png',
+            name='Failed to add task "%s"' % data['task_text'],
+            description='To project "%s"' % data['project_title'],
+            on_enter=effects.close_window(),
+        )]
 
 
 if __name__ == '__main__':

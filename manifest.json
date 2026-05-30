@@ -1,5 +1,5 @@
 {
-  "required_api_version": "^2.0.0",
+  "required_api_version": "^3.0.0",
   "name": "Vikunja Task",
   "description": "Vikunja extension",
   "developer_name": "Ugnius Soraka",
@@ -19,7 +19,7 @@
       "type": "input",
       "name": "Vikunja URL",
       "description": "Address of hosted Vikunja instance (https:// ...)",
-      "default_value": "https://try.vikunja.io/"
+      "default_value": "https://try.vikunja.io"
     },
     {
       "id": "api_token",
