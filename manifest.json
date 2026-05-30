@@ -6,7 +6,7 @@
   "triggers": {
     "vikunja_kw": {
       "name": "Vikunja Task",
-      "description": "Add a task to Vikunja. Supports +project, *label, !priority, due <date>.",
+      "description": "Add a task to Vikunja. Use: <shortcut> <task text>. Supports +project, *label, !priority, due <date>.",
       "default_keyword": "vk"
     }
   },
@@ -23,11 +23,11 @@
       "description": "API Token generated in your Vikunja settings",
       "default_value": "tk_xxxxxx"
     },
-    "default_project": {
-      "type": "text",
-      "name": "Default Project",
-      "description": "Default project ID (1 for Inbox)",
-      "default_value": "1"
+    "project_map": {
+      "type": "input",
+      "name": "Project Shortcuts",
+      "description": "JSON mapping of shortcut keywords to project IDs, e.g. {\"inbox\": \"1\", \"todo\": \"3\", \"groceries\": \"5\"}",
+      "default_value": "{\"inbox\": \"1\"}"
     }
   }
 }
